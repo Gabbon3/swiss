@@ -36,11 +36,11 @@ namespace plugins.eliminator
 
         // --- opzioni di filtraggio ---
 
-        [Option("pattern|p", "Filtra i file in base a un'espressione regolare sul nome", "Filtri")]
+        [Option("pattern|p", CliMeta.FilePatternDesc, "Filtri")]
         public string? Pattern { get; set; }
 
-        [Option("fixed|f", "Usa il pattern come stringa esatta invece che come espressione regolare", "Filtri")]
-        public bool FixedMatch { get; set; }
+        [Option(CliMeta.PatternMatchTypeFlag, CliMeta.PatternMatchTypeDescription, "Filtri")]
+        public PatternMatchType PatternMatchType { get; set; } = PatternMatchType.Auto;
 
         [Option("ignore-case|i", "Rende la ricerca case-insensitive", "Filtri")]
         public bool IgnoreCase { get; set; }

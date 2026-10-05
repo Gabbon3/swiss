@@ -220,8 +220,8 @@ class FindPlugin : Plugin
     {
         // FILES
         var filterOpts = new FileFilterFactory.FilterOptions(
-            Pattern: State.Pattern,
-            MatchType: settings.FixedMatch ? FilterFileNameMatchType.Fixed : FilterFileNameMatchType.Regex,
+            Pattern: ParseMatchPattern(settings.Pattern),
+            MatchType: settings.PatternMatchType,
             IgnoreCase: settings.IgnoreCase,
             DateBefore: settings.DateBefore,
             DateAfter: settings.DateAfter,
@@ -251,7 +251,7 @@ class FindPlugin : Plugin
         // filtro molto semplice fatto solo sul nome, da espandere in futuro con altri filtri magari
         var directoryFilter = new FileFilterFactory.FilterOptions(
             Pattern: settings.ExcludeDirsPattern,
-            MatchType: FilterFileNameMatchType.Regex,
+            MatchType: PatternMatchType.Regex,
             MatchFullPath: true // filtro su tutto il percorso per le cartelle
         );
 
@@ -291,7 +291,6 @@ class FindPlugin : Plugin
             RecurseSubdirectories = State.Recurse,
             Filter = State.FileFilter,
             DirectoryExcludeFilter = State.DirectoryExcludeFilter,
-            BufferSize = 64 * 1024,
             SingleReader = true,
             ReturnDirectoriesInOutput = settings.Dirs,
             MaxDegreeOfParallelism = settings.Threads

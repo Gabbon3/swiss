@@ -31,8 +31,8 @@ namespace plugins.move
 
         // --- opzioni di filtraggio ---
 
-        [Option("fixed|f", "Usa il pattern come stringa esatta invece che come espressione regolare", "Filtri")]
-        public bool FixedMatch { get; set; }
+        [Option(CliMeta.PatternMatchTypeFlag, CliMeta.PatternMatchTypeDescription, "Filtri")]
+        public PatternMatchType PatternMatchType { get; set; } = PatternMatchType.Auto;
 
         [Option("ignore-case|i", "Rende la ricerca case-insensitive", "Filtri")]
         public bool IgnoreCase { get; set; }
@@ -40,7 +40,7 @@ namespace plugins.move
         [Option(CliMeta.HiddenFlag, CliMeta.HiddenDesc, "Filtri")]
         public bool IncludeHidden { get; set; } = false;
 
-        [Option("pattern|p", "Filtra i file in base a un'espressione regolare sul nome", "Filtri")]
+        [Option("pattern|p", CliMeta.FilePatternDesc, "Filtri")]
         public string? Pattern { get; set; }
 
         [Option(CliMeta.DateAfterFlag, CliMeta.DateAfterDesc, "Filtri")]

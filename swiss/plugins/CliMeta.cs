@@ -16,7 +16,10 @@ public static class CliMeta
     
 
     public const string FilePatternFlag = "pattern|p";
-    public const string FilePatternDesc = "Filtra i file/cartelle in base al nome (regex)";
+    public const string FilePatternDesc = "Pattern per filtrare i nomi (in auto: testo semplice cerca una sottostringa, * o ? attivano il glob; usa * per tutti)";
+
+    public const string PatternMatchTypeFlag = "match-type|mt";
+    public const string PatternMatchTypeDescription = "Modalita' di match: auto (default: testo senza wildcard = sottostringa, * o ? = glob), glob (corrispondenza dell'intero nome con * e ?), fixed (ricerca per sottostringa), regex";
 
     public const string DirsExcludePatternFlag = "dir-exclude|de";
     public const string DirsExcludePatternDesc = "Pattern regex per le cartelle da non esplorare";

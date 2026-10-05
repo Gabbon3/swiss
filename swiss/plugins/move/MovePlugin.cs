@@ -142,7 +142,7 @@ class MovePlugin : Plugin
 
         var filterOpts = new FileFilterFactory.FilterOptions(
             Pattern: ParseMatchPattern(settings.Pattern),
-            MatchType: settings.FixedMatch ? FilterFileNameMatchType.Fixed : FilterFileNameMatchType.Regex,
+            MatchType: settings.PatternMatchType,
             IgnoreCase: settings.IgnoreCase,
             DateBefore: settings.DateBefore,
             DateAfter: settings.DateAfter

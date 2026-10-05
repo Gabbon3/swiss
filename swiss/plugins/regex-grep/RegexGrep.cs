@@ -332,7 +332,7 @@ namespace plugins.regexgrep
             var filterOpts = new FileFilterFactory.FilterOptions(
                 // forzo il glob per semplicita
                 Pattern: settings.PatternFileFilter,
-                MatchType: FilterFileNameMatchType.Regex,
+                MatchType: PatternMatchType.Regex,
                 DateBefore: settings.DateBefore,
                 DateAfter: settings.DateAfter
             );

@@ -39,7 +39,7 @@ namespace plugins.count
 
             var filterOpts = new FileFilterFactory.FilterOptions(
                 Pattern: ParseMatchPattern(settings.Pattern),
-                MatchType: settings.FixedMatch ? FilterFileNameMatchType.Fixed : FilterFileNameMatchType.Regex,
+                MatchType: settings.PatternMatchType,
                 IgnoreCase: settings.IgnoreCase,
                 DateBefore: settings.DateBefore,
                 DateAfter: settings.DateAfter,
@@ -66,7 +66,7 @@ namespace plugins.count
                 // filtro molto semplice fatto solo sul nome, da espandere in futuro con altri filtri magari
                 var directoryFilterOptions = new FileFilterFactory.FilterOptions(
                     Pattern: settings.ExcludeDirsPattern,
-                    MatchType: FilterFileNameMatchType.Regex,
+                    MatchType: PatternMatchType.Regex,
                     MatchFullPath: true // filtro su tutto il percorso per le cartelle
                 );
                 try

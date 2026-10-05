@@ -18,9 +18,6 @@ namespace plugins.count
         [Option("recursive|r", "Scansiona e conta anche nelle sottocartelle", "Configurazione")]
         public bool Recursive { get; set; }
 
-        [Option("fixed|f", "Usa il pattern come stringa esatta invece che come espressione regolare", "Configurazione")]
-        public bool FixedMatch { get; set; }
-
         [Option("ignore-case|i", "Rende la ricerca del pattern case-insensitive", "Configurazione")]
         public bool IgnoreCase { get; set; }
 
@@ -28,6 +25,10 @@ namespace plugins.count
         public bool Silence { get; set; } = false;
 
         // --- FILTRI ---
+
+        [Option(CliMeta.PatternMatchTypeFlag, CliMeta.PatternMatchTypeDescription, "Filtri")]
+        public PatternMatchType PatternMatchType { get; set; } = PatternMatchType.Auto;
+
         [Option(CliMeta.FilePatternFlag, CliMeta.FilePatternDesc, "Filtri")]
         public string? Pattern { get; set; }
 

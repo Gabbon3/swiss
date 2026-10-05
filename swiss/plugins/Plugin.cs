@@ -133,6 +133,23 @@ public abstract class Plugin
         return pattern;
     }
 
+    /// <summary>
+    /// Restituisce il PatternMatchType corrispettivo alla stringa passata in input
+    /// </summary>
+    /// <param name="value"></param>
+    /// <param name="matchType"></param>
+    /// <returns>Default restituisce Glob poiche molto potente e semplice da usare</returns>
+    protected static PatternMatchType ParsePatternMatchType(string? value)
+    {
+        return value switch
+        {
+            "regex" => PatternMatchType.Regex,
+            "fixed" => PatternMatchType.Fixed,
+            "glob" => PatternMatchType.Glob,
+            _ => PatternMatchType.Auto, // null oppure altro
+        };
+    }
+
     #endregion
 
     #region Value Assignment
@@ -188,6 +205,11 @@ public abstract class Plugin
         {
             RelativeSize relativeSize = RelativeSize.Parse(value);
             prop.SetValue(obj, relativeSize);
+        }
+        // pattern match type
+        else if (targetType == typeof(PatternMatchType))
+        {
+            prop.SetValue(obj, ParsePatternMatchType(value));
         }
         // TODO: aggiungere supporto per altri tipi
     }
@@ -397,7 +419,7 @@ public abstract class Plugin
     {
         lock (_printErrorLock)
         {
-            ConsolePlus.Write($"[Red][!!!] {Name}: {message}[/]");
+            ConsolePlus.Write($"[Red][ERRORE] {Name}: {message}[/]");
         }
     }
 

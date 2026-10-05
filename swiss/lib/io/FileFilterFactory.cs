@@ -11,11 +11,15 @@ namespace lib.io
     // non possono essere usate nei tipi generici standard come Func<T, R>.
     public delegate bool SpanMatchDelegate(ReadOnlySpan<char> span);
 
-    public enum FilterFileNameMatchType
+    /// <summary>
+    /// Definisce il modello di filtraggio dei file
+    /// </summary>
+    public enum PatternMatchType
     {
+        Auto, // si adatta in automatico in base al pattern passato
         Regex, // usa regex compilata non backtracking
         Fixed, // usa indexOf
-        Glob   // pattern glob semplice, simile a regex ma piu veloce
+        Glob   // pattern glob semplice di windows, simile a regex ma piu veloce
     }
 
     public static class FileFilterFactory
@@ -23,7 +27,7 @@ namespace lib.io
         // Record che raggruppa tutti i filtri
         public record FilterOptions(
             string? Pattern = null,
-            FilterFileNameMatchType MatchType = FilterFileNameMatchType.Regex, // default regex per semplicita
+            PatternMatchType MatchType = PatternMatchType.Auto,
             bool IgnoreCase = true,
             RelativeDateTime? DateAfter = null,
             RelativeDateTime? DateBefore = null,
@@ -45,9 +49,10 @@ namespace lib.io
                     string caseStr = IgnoreCase ? "(Case-Insensitive)" : "(Case-Sensitive)";
                     string matchStr = MatchType switch
                     {
-                        FilterFileNameMatchType.Regex => "Espressione regolare",
-                        FilterFileNameMatchType.Fixed => "Testo fisso",
-                        FilterFileNameMatchType.Glob => "Pattern glob",
+                        PatternMatchType.Auto => "Sceglie la modalità di ricerca più adatta in base al pattern in automatico",
+                        PatternMatchType.Regex => "Espressione regolare",
+                        PatternMatchType.Fixed => "Testo fisso",
+                        PatternMatchType.Glob => "Pattern glob",
                         _ => "Sconosciuto"
                     };
                     // Aggiungo il contesto dell'ambito di ricerca
@@ -165,6 +170,24 @@ namespace lib.io
                 };
             }
 
+            // Gestione pattern AUTO
+            // dato che di default usiamo il Auto, dobbiamo scegliere tra Fixed e Glob:
+            // - se il pattern contiene * oppure ? allora lo trattiamo come Glob
+            // - altrimenti usiamo Fixed
+            PatternMatchType matchType = options.MatchType;
+            // se il pattern non è vuoto e la modalità è AUTO
+            if (options.MatchType == PatternMatchType.Auto && !string.IsNullOrEmpty(options.Pattern))
+            {
+                // Fixed se non contiene i caratteri glob
+                if (!(options.Pattern.Contains('*') || options.Pattern.Contains('?')))
+                {
+                    matchType = PatternMatchType.Fixed;
+                } else
+                {
+                    matchType = PatternMatchType.Glob;
+                }
+            }
+
             // --- FILTRI SULLE DATE ---
             if (options.DateAfter.HasValue)
             {
@@ -198,7 +221,7 @@ namespace lib.io
                 // Salviamo il flag per evitare l'accesso continuativo alla proprietà nel loop
                 bool fullPath = options.MatchFullPath;
 
-                if (options.MatchType == FilterFileNameMatchType.Fixed)
+                if (matchType == PatternMatchType.Fixed)
                 {
                     // Fixed: pura ricerca di sottostringa (IndexOf)
                     StringComparison comp = options.IgnoreCase ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
@@ -206,16 +229,16 @@ namespace lib.io
 
                     // MatchOnTarget si occupa di fornirci lo Span corretto (FileName o Percorso Completo)
                     AddFilter((ref FileSystemEntry entry) => 
-                        MatchOnTarget(ref entry, fullPath, span => span.IndexOf(pattern.AsSpan(), comp) >= 0));
+                        MatchOnTarget(ref entry, fullPath, pathDaAnalizzare => pathDaAnalizzare.IndexOf(pattern.AsSpan(), comp) >= 0));
                 }
-                else if (options.MatchType == FilterFileNameMatchType.Glob)
+                else if (matchType == PatternMatchType.Glob)
                 {
                     // Glob
                     string pattern = options.Pattern;
                     bool ignoreCase = options.IgnoreCase;
 
-                    AddFilter((ref FileSystemEntry entry) => 
-                        MatchOnTarget(ref entry, fullPath, span => FileSystemName.MatchesSimpleExpression(pattern.AsSpan(), span, ignoreCase)));
+                    AddFilter((ref FileSystemEntry entry) =>  // span corrisponde al percorso/nome file da analizzare
+                        MatchOnTarget(ref entry, fullPath, pathDaAnalizzare => FileSystemName.MatchesSimpleExpression(pattern.AsSpan(), pathDaAnalizzare, ignoreCase)));
                 }
                 else
                 {
@@ -226,7 +249,7 @@ namespace lib.io
 
                     // Regex.IsMatch opera a livello di buffer, no altre stringhe
                     AddFilter((ref FileSystemEntry entry) => 
-                        MatchOnTarget(ref entry, fullPath, span => regex.IsMatch(span)));
+                        MatchOnTarget(ref entry, fullPath, pathDaAnalizzare => regex.IsMatch(pathDaAnalizzare)));
                 }
             }
             return finalFilter;
