@@ -19,8 +19,8 @@ AnsiConsole.Profile.Encoding = System.Text.Encoding.UTF8;
 AnsiConsole.Profile.Capabilities.Ansi = true;
 AnsiConsole.Profile.Capabilities.ColorSystem = ColorSystem.Standard;
 // info sulla versione
-const string version = "2.5.0";
-const string versionDate = "05.10.2026";
+const string version = "2.6.0";
+const string versionDate = "08.10.2026";
 const string author = "Gabbon3";
 // traccio su event log
 // AuditLogger.LogCommandExecution(string.Join(' ', args));
