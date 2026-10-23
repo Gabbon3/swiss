@@ -469,6 +469,7 @@ namespace plugins.regexgrep
                     int bytesToRead = (int)Math.Min(byteBuffer.Length - leftoverBytes, fileLength - fileOffset);
                     int bytesRead = RandomAccess.Read(handle, byteBuffer.AsSpan(leftoverBytes, bytesToRead), fileOffset);
                     if (bytesRead == 0) break;
+                    bool isFinalChunk = fileOffset + bytesRead >= fileLength;
 
                     int currentByteLength = bytesRead + leftoverBytes;
                     ReadOnlySpan<byte> byteSpan = byteBuffer.AsSpan(0, currentByteLength);
@@ -495,7 +496,8 @@ namespace plugins.regexgrep
                     ReadOnlySpan<char> searchSpan = charBuffer.AsSpan(0, charsWritten);
 
                     // definisco la "safe-zone" per la regex: escludo la coda del buffer che verrà ri-analizzata nel chunk successivo
-                    int searchEndIndex = isFirstChunk ? charsWritten : charsWritten - overlapChars;
+                    // sull'ultimo chunk non c'è un giro successivo che recuperi la coda, quindi la scansione arriva fino alla fine
+                    int searchEndIndex = isFinalChunk ? charsWritten : charsWritten - overlapChars;
                     if (searchEndIndex < 0) searchEndIndex = charsWritten;
 
                     // avvio lo scan sul testo normalizzato in memoria
