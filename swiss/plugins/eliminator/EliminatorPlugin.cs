@@ -2,12 +2,9 @@
 using System.Threading.Channels;
 using lib.io;
 using lib.utils;
-using lib.utils.span;
 using lib.console;
 using lib.io.stack;
 using Spectre.Console;
-using System.Buffers;
-using lib.io.collections;
 
 namespace plugins.eliminator
 {
@@ -35,6 +32,7 @@ namespace plugins.eliminator
             public bool IsWhatIf { get; set; }
             public EliminationStateDebug DebugInfo { get; set; } = new();
             public bool IsRecursive { get; set; }
+            public bool DirsOnly { get; set; }
             public FileAttributes AttributesToSkip { get; set; }
             public bool DropInstant { get; set; }
             public int ThreadNumber { get; set; }
@@ -42,7 +40,6 @@ namespace plugins.eliminator
             public FileSystemFilter? FileFilter { get; set; }
 
             public Channel<StackFileInfo>? WorkChannel { get; set; }
-            public SpanArena<char>? DirectoryToRemove { get; set; }
             public long[] DroppedFilesCountList { get; set; } = [];
             public long[] BytesSavedList { get; set; } = [];
             public bool IsProcessing { get; set; } = true;
@@ -113,24 +110,21 @@ namespace plugins.eliminator
 
             ConsolePlus.Write($"[Cyan]#[/] Avvio cancellazione ... {(State.IsWhatIf ? "(DEBUG)" : "")}");
 
-            // 3. inizializzo il task di producer
-            var producerTask = CreateProducerTask(settings, ct);
+            if (!State.DirsOnly)
+            {
+                var producerTask = CreateProducerTask(settings, ct);
+                var workers = CreateWorkerTasks(ct);
+                Task? monitorTask = null;
+                if (!settings.Silence) monitorTask = CreateMonitorTask(ct);
 
-            // 4. inizializzo i task dei consumer (i workers veri e propri)
-            var workers = CreateWorkerTasks(ct);
+                await Task.WhenAll(workers);
+                State.IsProcessing = false;
+                if (!settings.Silence) await monitorTask!;
+                await producerTask;
+            }
 
-            // 5. inizializzo il task per il monitor UI
-            Task? monitorTask = null;
-            if (!settings.Silence) monitorTask = CreateMonitorTask(ct);
-
-            // avvio e attendo tutti i workers
-            await Task.WhenAll(workers);
-            State.IsProcessing = false;
-            if (!settings.Silence) await monitorTask!;
-            await producerTask;
-
-            // pulizia finale
-            Cleanup(settings);
+            bool targetWouldBeEmpty = CleanupSubDirectories();
+            CleanUpRootFolder(targetWouldBeEmpty);
 
             // 6. stampa statistiche finali
             PrintFinalStatistics();
@@ -155,6 +149,7 @@ namespace plugins.eliminator
             State.TargetPath = targetPath;
             State.IsWhatIf = settings.WhatIf;
             State.IsRecursive = settings.Recursive;
+            State.DirsOnly = settings.DirsOnly;
             State.ThreadNumber = settings.Threads ?? Environment.ProcessorCount;
 
             State.AttributesToSkip = FileAttributes.System;
@@ -191,7 +186,7 @@ namespace plugins.eliminator
 
         /// <summary>
         /// Crea il task che enumera i file dal file system e li invia al canale di lavoro.
-        /// Accede a: State.TargetPath, State.IsDebug, State.IsRecursive, State.FileFilter, State.WorkChannel
+        /// Applica due logiche di scansione: FastWalker per scansioni multi-thread ad alte prestazioni, e FileSystemEnumerable per scansioni singolo thread.
         /// </summary>
         private Task CreateProducerTask(EliminatorSettings settings, CancellationToken ct)
         {
@@ -201,100 +196,106 @@ namespace plugins.eliminator
                 SingleReader = false
             });
 
-            State.DirectoryToRemove = new SpanArena<char>();
-
-            // calcolo la lunghezza della root per tagliare i percorsi relativi in sicurezza
-            int rootLength = State.TargetPath.Length;
-            if (!State.TargetPath.EndsWith(Path.DirectorySeparatorChar) && !State.TargetPath.EndsWith(Path.AltDirectorySeparatorChar))
-            {
-                rootLength++;
-            }
-
-            var enumOptions = new EnumerationOptions
-            {
-                IgnoreInaccessible = true,
-                RecurseSubdirectories = State.IsRecursive,
-                BufferSize = 64 * 1024,
-                AttributesToSkip = State.AttributesToSkip
-            };
-
-            IEnumerable<StackFileInfo> itemsToScan = new FileSystemEnumerable<StackFileInfo>(
-                State.TargetPath,
-                (ref FileSystemEntry entry) => new StackFileInfo(ref entry, true), // null char nel path alla fine con true
-                enumOptions
-            )
-            {
-                ShouldIncludePredicate = (ref FileSystemEntry entry) =>
-                {
-                    if (entry.IsDirectory)
-                    {
-                        // pushamo la cartella nello stack subito
-                        ReadOnlySpan<char> dirSpan = entry.Directory;
-                        ReadOnlySpan<char> nameSpan = entry.FileName;
-
-                        // calcolo il percorso relativo
-                        if (dirSpan.Length >= rootLength || (dirSpan.Length == rootLength - 1))
-                        {
-                            ReadOnlySpan<char> relParent = dirSpan.Length > rootLength ? dirSpan[rootLength..] : [];
-
-                            // siamo nella root
-                            if (relParent.IsEmpty)
-                            {
-                                State.DirectoryToRemove.Push(nameSpan);
-                            }
-                            else
-                            {
-                                // unisco genitore relativo e nome corrente usando la memoria dello stack
-                                Span<char> tempPath = stackalloc char[relParent.Length + 1 + nameSpan.Length];
-                                relParent.CopyTo(tempPath);
-                                tempPath[relParent.Length] = Path.DirectorySeparatorChar;
-                                nameSpan.CopyTo(tempPath[(relParent.Length + 1)..]);
-
-                                State.DirectoryToRemove.Push(tempPath);
-                            }
-                        }
-                        return false; // non pushamo mai nel channel le directory
-                    }
-
-                    // Filtraggio File
-                    if (State.FileFilter != null && !State.FileFilter(ref entry))
-                    {
-                        return false;
-                    }
-
-                    return true;
-                }
-            };
-
             return Task.Run(async () =>
             {
                 try
                 {
-                    foreach (var item in itemsToScan)
+                    // ROOT: uso FastWalker per scansione multi-thread se il numero di thread di cancellazione è sufficientemente alto (12 threads)
+                    //       calcolando il numero di threads per la scansione come 1/4 del totale dei threads di cancellazione per ottenere equilibrio
+                    if (State.IsRecursive && State.ThreadNumber >= 12)
                     {
-                        ct.ThrowIfCancellationRequested();
-                        if (State.IsWhatIf)
+                        int scanThreads = State.ThreadNumber / 4;
+                        var walkerOptions = new FastWalkerOptions
                         {
-                            State.DebugInfo.DroppedFilesCount++;
-                            State.DebugInfo.BytesSaved += item.Length;
+                            MaxDegreeOfParallelism = scanThreads,
+                            BufferSize = 64 * 1024,
+                            AttributesToSkip = State.AttributesToSkip,
+                            RecurseSubdirectories = State.IsRecursive,
+                            Filter = State.FileFilter,
+                            ReturnDirectoriesInOutput = false
+                        };
 
-                            DateTime fileDate = item.LastWriteTime;
+                        var itemsToScan = FastWalker.Walk<StackFileInfo>(
+                            State.TargetPath,
+                            (ref FileSystemEntry entry) => new StackFileInfo(ref entry, true),
+                            walkerOptions,
+                            ct);
 
-                            if (!State.DebugInfo.OldestFileDate.HasValue || fileDate < State.DebugInfo.OldestFileDate.Value)
+                        await foreach (var item in itemsToScan.ReadAllAsync(ct))
+                        {
+                            if (State.IsWhatIf)
                             {
-                                State.DebugInfo.OldestFileDate = fileDate;
-                            }
+                                State.DebugInfo.DroppedFilesCount++;
+                                State.DebugInfo.BytesSaved += item.Length;
 
-                            if (!State.DebugInfo.NewestFileDate.HasValue || fileDate > State.DebugInfo.NewestFileDate.Value)
+                                DateTime fileDate = item.LastWriteTime;
+
+                                if (!State.DebugInfo.OldestFileDate.HasValue || fileDate < State.DebugInfo.OldestFileDate.Value)
+                                {
+                                    State.DebugInfo.OldestFileDate = fileDate;
+                                }
+
+                                if (!State.DebugInfo.NewestFileDate.HasValue || fileDate > State.DebugInfo.NewestFileDate.Value)
+                                {
+                                    State.DebugInfo.NewestFileDate = fileDate;
+                                }
+
+                                item.Dispose();
+                            }
+                            else
                             {
-                                State.DebugInfo.NewestFileDate = fileDate;
+                                await State.WorkChannel.Writer.WriteAsync(item, ct);
                             }
-
-                            item.Dispose(); // in debug restituisco subito all'arraypool
                         }
-                        else
+                    }
+                    else // FALLBACK: uso FileSystemEnumerable per scansione singolo thread se il numero di threads di cancellazione è basso o se non è richiesta la ricorsione
+                    {
+                        var enumOptions = new EnumerationOptions
                         {
-                            await State.WorkChannel.Writer.WriteAsync(item, ct);
+                            IgnoreInaccessible = true,
+                            RecurseSubdirectories = State.IsRecursive,
+                            BufferSize = 64 * 1024,
+                            AttributesToSkip = State.AttributesToSkip
+                        };
+
+                        IEnumerable<StackFileInfo> itemsToScan = new FileSystemEnumerable<StackFileInfo>(
+                            State.TargetPath,
+                            (ref FileSystemEntry entry) => new StackFileInfo(ref entry, true),
+                            enumOptions)
+                        {
+                            ShouldIncludePredicate = (ref FileSystemEntry entry) =>
+                            {
+                                if (entry.IsDirectory) return false;
+                                return State.FileFilter == null || State.FileFilter(ref entry);
+                            }
+                        };
+
+                        foreach (var item in itemsToScan)
+                        {
+                            ct.ThrowIfCancellationRequested();
+                            if (State.IsWhatIf)
+                            {
+                                State.DebugInfo.DroppedFilesCount++;
+                                State.DebugInfo.BytesSaved += item.Length;
+
+                                DateTime fileDate = item.LastWriteTime;
+
+                                if (!State.DebugInfo.OldestFileDate.HasValue || fileDate < State.DebugInfo.OldestFileDate.Value)
+                                {
+                                    State.DebugInfo.OldestFileDate = fileDate;
+                                }
+
+                                if (!State.DebugInfo.NewestFileDate.HasValue || fileDate > State.DebugInfo.NewestFileDate.Value)
+                                {
+                                    State.DebugInfo.NewestFileDate = fileDate;
+                                }
+
+                                item.Dispose();
+                            }
+                            else
+                            {
+                                await State.WorkChannel.Writer.WriteAsync(item, ct);
+                            }
                         }
                     }
                 }
@@ -304,7 +305,7 @@ namespace plugins.eliminator
                 {
                     State.WorkChannel.Writer.Complete();
                 }
-            }, ct);
+            });
         }
 
         #endregion
@@ -525,60 +526,132 @@ namespace plugins.eliminator
         // Metodi secondari di Help
         // # ---------------------------------- #
 
+        private readonly record struct DirectoryEntryToPrune(
+            string Path,
+            bool IsDirectory,
+            bool MatchesFilter,
+            bool IsReparsePoint);
+
         /// <summary>
-        /// Elimina le cartelle presenti sullo stack e se richiesto anche la cartella sorgente
+        /// Rimuove ricorsivamente le sottocartelle vuote dopo la fase di elaborazione dei file.
+        /// In modalità WhatIf simula la rimozione e stampa i percorsi che verrebbero cancellati.
         /// </summary>
-        private void Cleanup(EliminatorSettings settings)
+        /// <returns>Indica se la directory target risulterebbe vuota dopo la pulizia.</returns>
+        private bool CleanupSubDirectories()
         {
-            // 0. Se non è richiesta la pulizia delle cartelle skippo
-            if (settings.DropDirs == false)
+            if (!State.IsWhatIf)
+                ConsolePlus.Write($"[Green]#[/] Pulizia finale...");
+
+            return PruneEmptyDirectories(State.TargetPath, isRoot: true, matchesFilter: true);
+        }
+
+        /// <summary>
+        /// Visita l'albero in post-order e rimuove, o in WhatIf segnala, le directory vuote filtrate.
+        /// </summary>
+        /// <param name="currentDir">Directory da visitare.</param>
+        /// <param name="isRoot">Indica se la directory corrente è la radice target, non rimossa da questo metodo.</param>
+        /// <param name="matchesFilter">Indica se la directory corrente supera il filtro.</param>
+        /// <returns>
+        /// Per la radice indica se risulterebbe vuota; per le sottocartelle indica se è stata o verrebbe rimossa.
+        /// </returns>
+        private bool PruneEmptyDirectories(string currentDir, bool isRoot, bool matchesFilter)
+        {
+            var enumOptions = new EnumerationOptions
             {
-                State.DirectoryToRemove!.Dispose();
-                return;
-            }
-            ConsolePlus.Write($"[Green]#[/] Pulizia finale...");
-            // 1. pulizia ricorsiva dell'albero
-            try
-            {
-                if (State.DirectoryToRemove != null && State.DirectoryToRemove.Count > 0)
+                IgnoreInaccessible = true,
+                RecurseSubdirectories = false,
+                BufferSize = 64 * 1024,
+                AttributesToSkip = State.AttributesToSkip
+            };
+
+            var directories = new FileSystemEnumerable<DirectoryEntryToPrune>(
+                currentDir,
+                (ref FileSystemEntry entry) =>
                 {
-                    // affitto un buffer sufficientemente grande per i path
-                    char[] cleanBuffer = ArrayPool<char>.Shared.Rent(4096);
-                    try
+                    bool matchesFilter = entry.IsDirectory
+                        ? State.FileFilter == null || State.FileFilter(ref entry)
+                        : State.IsWhatIf && !State.DirsOnly &&
+                          (State.FileFilter == null || State.FileFilter(ref entry));
+                    string path = Path.Combine(entry.Directory.ToString(), entry.FileName.ToString());
+                    return new DirectoryEntryToPrune(
+                        path,
+                        entry.IsDirectory,
+                        matchesFilter,
+                        (entry.Attributes & FileAttributes.ReparsePoint) != 0);
+                },
+                enumOptions)
+            {
+                ShouldIncludePredicate = (ref FileSystemEntry entry) => true
+            };
+
+            bool hasRemainingEntries = false;
+            foreach (var directory in directories)
+            {
+                if (!directory.IsDirectory)
+                {
+                    // In WhatIf i file selezionati saranno eliminati, mentre in DirsOnly o se filtrati resteranno.
+                    if (!State.IsWhatIf || State.DirsOnly || !directory.MatchesFilter)
+                        hasRemainingEntries = true;
+                }
+                else if (directory.IsReparsePoint)
+                {
+                    // Non si attraversano i link: in WhatIf non è possibile dedurne in sicurezza il contenuto.
+                    if (!State.IsWhatIf && directory.MatchesFilter)
                     {
-                        while (State.DirectoryToRemove.TryPop(out ReadOnlySpan<char> relativeDir))
-                        {
-                            Span<char> workSpan = cleanBuffer.AsSpan();
-
-                            // ricostruisco il path: Root + Relativo
-                            Span<char> remaining = workSpan.PathCombine(State.TargetPath.AsSpan(), endWithSeparator: true);
-                            remaining = remaining.PathCombine(relativeDir, endWithSeparator: false);
-
-                            int finalLength = cleanBuffer.Length - remaining.Length;
-                            // aggiungo direttamente il nullchar per alleggerire NativeIO
-                            cleanBuffer[finalLength] = '\0';
-
-                            // provo a cancellare, se fallisce non importa vado oltre (sono rimasti file appesi che non sono passati al filtro).
-                            NativeIO.RemoveDirectory(cleanBuffer.AsSpan(0, finalLength + 1), throwOnError: false);
-                        }
+                        if (!NativeIO.RemoveDirectory(directory.Path, throwOnError: false))
+                            hasRemainingEntries = true;
                     }
-                    finally
+                    else
                     {
-                        ArrayPool<char>.Shared.Return(cleanBuffer);
+                        hasRemainingEntries = true;
                     }
                 }
+                else
+                {
+                    bool removed = PruneEmptyDirectories(
+                        directory.Path,
+                        isRoot: false,
+                        matchesFilter: directory.MatchesFilter);
+                    if (!removed)
+                        hasRemainingEntries = true;
+                }
             }
-            finally
+
+            if (isRoot)
+                return !hasRemainingEntries;
+
+            if (hasRemainingEntries || !matchesFilter)
+                return false;
+
+            if (State.IsWhatIf)
             {
-                // 2. restituisco il buffer dell'arena
-                State.DirectoryToRemove!.Dispose();
+                ConsolePlus.Write($"[Yellow]{currentDir}[/]");
+                return true;
             }
-            // 3. rimozione cartella radice
-            if (State.DropTargetPathAtEnd)
+
+            return NativeIO.RemoveDirectory(currentDir, throwOnError: false);
+        }
+
+        /// <summary>
+        /// Rimuove la directory target alla fine dell'operazione, oppure ne mostra la preview in WhatIf.
+        /// </summary>
+        /// <param name="targetWouldBeEmpty">Indica se la radice risulterebbe vuota al termine della pulizia.</param>
+        private void CleanUpRootFolder(bool targetWouldBeEmpty)
+        {
+            if (!State.DropTargetPathAtEnd)
             {
-                ConsolePlus.Write($"[Red]#[/] Rimuovo cartella sorgente [Yellow]{State.TargetPath}[/]...");
-                NativeIO.RemoveDirectory(State.TargetPath, throwOnError: false);
+                return;
             }
+
+            if (State.IsWhatIf)
+            {
+                if (targetWouldBeEmpty)
+                    ConsolePlus.Write($"[Green]#[/] Verrebbe cancellata la cartella [Yellow]{State.TargetPath}[/]");
+                return;
+            }
+
+            ConsolePlus.Write($"[Red]#[/] Rimuovo cartella sorgente [Yellow]{State.TargetPath}[/]...");
+            NativeIO.RemoveDirectory(State.TargetPath, throwOnError: false);
         }
 
         public override void Help()
