@@ -117,14 +117,53 @@ namespace plugins.eliminator
                 Task? monitorTask = null;
                 if (!settings.Silence) monitorTask = CreateMonitorTask(ct);
 
-                await Task.WhenAll(workers);
-                State.IsProcessing = false;
-                if (!settings.Silence) await monitorTask!;
+                try
+                {
+                    await Task.WhenAll(workers);
+                }
+                catch (OperationCanceledException) when (ct.IsCancellationRequested)
+                {
+                }
+                finally
+                {
+                    State.IsProcessing = false;
+                }
+
+                if (monitorTask != null)
+                {
+                    try
+                    {
+                        await monitorTask;
+                    }
+                    catch (OperationCanceledException) when (ct.IsCancellationRequested)
+                    {
+                    }
+                }
+
                 await producerTask;
             }
 
-            bool targetWouldBeEmpty = CleanupSubDirectories();
-            CleanUpRootFolder(targetWouldBeEmpty);
+            if (ct.IsCancellationRequested)
+            {
+                return;
+            }
+
+            bool targetWouldBeEmpty;
+            try
+            {
+                targetWouldBeEmpty = CleanupSubDirectories(ct);
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                return;
+            }
+
+            if (ct.IsCancellationRequested)
+            {
+                return;
+            }
+
+            CleanUpRootFolder(targetWouldBeEmpty, ct);
 
             // 6. stampa statistiche finali
             PrintFinalStatistics();
@@ -556,12 +595,19 @@ namespace plugins.eliminator
         /// In modalità WhatIf simula la rimozione e stampa i percorsi che verrebbero cancellati.
         /// </summary>
         /// <returns>Indica se la directory target risulterebbe vuota dopo la pulizia.</returns>
-        private bool CleanupSubDirectories()
+        private bool CleanupSubDirectories(CancellationToken ct)
         {
+            ct.ThrowIfCancellationRequested();
+
+            if (!State.DirsOnly)
+            {
+                return false;
+            }
+
             if (!State.IsWhatIf)
                 ConsolePlus.Write($"[Green]#[/] Pulizia finale...");
 
-            return PruneEmptyDirectories(State.TargetPath, isRoot: true, matchesFilter: true);
+            return PruneEmptyDirectories(State.TargetPath, isRoot: true, matchesFilter: true, ct);
         }
 
         /// <summary>
@@ -570,11 +616,18 @@ namespace plugins.eliminator
         /// <param name="currentDir">Directory da visitare.</param>
         /// <param name="isRoot">Indica se la directory corrente è la radice target, non rimossa da questo metodo.</param>
         /// <param name="matchesFilter">Indica se la directory corrente supera il filtro.</param>
+        /// <param name="ct">Token che interrompe la pulizia e la preview.</param>
         /// <returns>
         /// Per la radice indica se risulterebbe vuota; per le sottocartelle indica se è stata o verrebbe rimossa.
         /// </returns>
-        private bool PruneEmptyDirectories(string currentDir, bool isRoot, bool matchesFilter)
+        private bool PruneEmptyDirectories(
+            string currentDir,
+            bool isRoot,
+            bool matchesFilter,
+            CancellationToken ct)
         {
+            ct.ThrowIfCancellationRequested();
+
             var enumOptions = new EnumerationOptions
             {
                 IgnoreInaccessible = true,
@@ -606,6 +659,8 @@ namespace plugins.eliminator
             bool hasRemainingEntries = false;
             foreach (var directory in directories)
             {
+                ct.ThrowIfCancellationRequested();
+
                 if (!directory.IsDirectory)
                 {
                     // In WhatIf i file selezionati saranno eliminati, mentre in DirsOnly o se filtrati resteranno.
@@ -619,11 +674,14 @@ namespace plugins.eliminator
                     bool removed = PruneEmptyDirectories(
                         directory.Path,
                         isRoot: false,
-                        matchesFilter: directory.MatchesFilter);
+                        matchesFilter: directory.MatchesFilter,
+                        ct);
                     if (!removed)
                         hasRemainingEntries = true;
                 }
             }
+
+            ct.ThrowIfCancellationRequested();
 
             if (isRoot)
                 return !hasRemainingEntries;
@@ -644,9 +702,9 @@ namespace plugins.eliminator
         /// Rimuove la directory target alla fine dell'operazione, oppure ne mostra la preview in WhatIf.
         /// </summary>
         /// <param name="targetWouldBeEmpty">Indica se la radice risulterebbe vuota al termine della pulizia.</param>
-        private void CleanUpRootFolder(bool targetWouldBeEmpty)
+        private void CleanUpRootFolder(bool targetWouldBeEmpty, CancellationToken ct)
         {
-            if (!State.DropTargetPathAtEnd)
+            if (ct.IsCancellationRequested || !State.DirsOnly || !State.DropTargetPathAtEnd)
             {
                 return;
             }

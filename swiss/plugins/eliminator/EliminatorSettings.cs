@@ -16,7 +16,7 @@ namespace plugins.eliminator
         [Option("recursive|r", "Scansiona anche le sottocartelle", "Configurazione")]
         public bool Recursive { get; set; }
 
-        [Option("drop-source|ds", "Cancella al termine anche la cartella target", "Configurazione")]
+        [Option("drop-source|ds", "In modalità dirs-only cancella al termine anche la cartella target", "Configurazione")]
         public bool DropSource { get; set; } = false;
 
         [Option("dirs-only|do", "Salta i file ed elimina solo le cartelle vuote, supportando i filtri", "Configurazione")]
