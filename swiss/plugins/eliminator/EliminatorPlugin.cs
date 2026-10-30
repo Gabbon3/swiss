@@ -146,6 +146,23 @@ namespace plugins.eliminator
             if (string.IsNullOrEmpty(targetPath))
                 return false;
 
+            FileAttributes targetAttributes;
+            try
+            {
+                targetAttributes = File.GetAttributes(targetPath);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException)
+            {
+                PrintError($"Impossibile accedere al percorso target '{targetPath}': {ex.Message}");
+                return false;
+            }
+
+            if ((targetAttributes & FileAttributes.ReparsePoint) != 0)
+            {
+                PrintError($"Il percorso target non può essere un collegamento: {targetPath}");
+                return false;
+            }
+
             State.TargetPath = targetPath;
             State.IsWhatIf = settings.WhatIf;
             State.IsRecursive = settings.Recursive;
@@ -267,7 +284,9 @@ namespace plugins.eliminator
                             {
                                 if (entry.IsDirectory) return false;
                                 return State.FileFilter == null || State.FileFilter(ref entry);
-                            }
+                            },
+                            ShouldRecursePredicate = (ref FileSystemEntry entry) =>
+                                (entry.Attributes & FileAttributes.ReparsePoint) == 0
                         };
 
                         foreach (var item in itemsToScan)
@@ -594,18 +613,7 @@ namespace plugins.eliminator
                         hasRemainingEntries = true;
                 }
                 else if (directory.IsReparsePoint)
-                {
-                    // Non si attraversano i link: in WhatIf non è possibile dedurne in sicurezza il contenuto.
-                    if (!State.IsWhatIf && directory.MatchesFilter)
-                    {
-                        if (!NativeIO.RemoveDirectory(directory.Path, throwOnError: false))
-                            hasRemainingEntries = true;
-                    }
-                    else
-                    {
-                        hasRemainingEntries = true;
-                    }
-                }
+                    hasRemainingEntries = true;
                 else
                 {
                     bool removed = PruneEmptyDirectories(

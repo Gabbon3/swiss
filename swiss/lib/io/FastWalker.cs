@@ -68,6 +68,7 @@ namespace lib.io
             FastWalkerOptions? options = null,
             CancellationToken ct = default)
         {
+            EnsureRootIsNotReparsePoint(rootPath);
             options ??= new FastWalkerOptions();
 
             // # THREADS
@@ -139,6 +140,11 @@ namespace lib.io
                                     {
                                         if (entry.IsDirectory)
                                         {
+                                            if ((entry.Attributes & FileAttributes.ReparsePoint) != 0)
+                                            {
+                                                return false;
+                                            }
+
                                             // filtro di esclusione sulle cartelle per l'esplorazione (accodamento sul dirChannel)
                                             // se match true allora ignoro completamente questo percorso
                                             if (options.DirectoryExcludeFilter != null && options.DirectoryExcludeFilter(ref entry))
@@ -233,6 +239,7 @@ namespace lib.io
             TransformFileSystemEntry<T> transform,
             FastWalkerOptions? options = null)
         {
+            EnsureRootIsNotReparsePoint(rootPath);
             options ??= new FastWalkerOptions();
 
             var localOptions = new EnumerationOptions
@@ -257,6 +264,11 @@ namespace lib.io
                     // Gestione cartelle
                     if (entry.IsDirectory)
                     {
+                        if ((entry.Attributes & FileAttributes.ReparsePoint) != 0)
+                        {
+                            return false;
+                        }
+
                         return options.ReturnDirectoriesInOutput;
                     }
                     // Factory di filtri
@@ -266,8 +278,25 @@ namespace lib.io
                     }
 
                     return true;
-                }
+                },
+                ShouldRecursePredicate = (ref FileSystemEntry entry) =>
+                    (entry.Attributes & FileAttributes.ReparsePoint) == 0
             };
+        }
+
+        /// <summary>
+        /// Verifica che il percorso radice non sia un reparse point (collegamento simbolico o junction).
+        /// Se lo è, lancia un'eccezione IOException. In questo modo evitiamo disastri
+        /// finendo in percorsi che non ci aspettiamo e che potrebbero portare a cancellazioni o modifiche indesiderate.
+        /// </summary>
+        /// <param name="rootPath"></param>
+        /// <exception cref="IOException"></exception>
+        private static void EnsureRootIsNotReparsePoint(string rootPath)
+        {
+            if ((File.GetAttributes(rootPath) & FileAttributes.ReparsePoint) != 0)
+            {
+                throw new IOException($"Il percorso radice non può essere un collegamento: {rootPath}");
+            }
         }
 
         #endregion
@@ -297,6 +326,7 @@ namespace lib.io
             FastWalkerOptions? options = null,
             CancellationToken ct = default)
         {
+            EnsureRootIsNotReparsePoint(rootPath);
             options ??= new FastWalkerOptions();
             // Se non viene passato dall'esterno, lo creiamo internamente
             counters ??= new FastWalkerCounters();
@@ -346,6 +376,11 @@ namespace lib.io
                                     {
                                         if (entry.IsDirectory)
                                         {
+                                            if ((entry.Attributes & FileAttributes.ReparsePoint) != 0)
+                                            {
+                                                return false;
+                                            }
+
                                             if (options.RecurseSubdirectories)
                                             {
                                                 Interlocked.Increment(ref pendingWork);
