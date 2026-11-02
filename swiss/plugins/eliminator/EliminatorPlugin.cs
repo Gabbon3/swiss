@@ -538,6 +538,10 @@ namespace plugins.eliminator
 
                                 string fpsStr = $"{(int)filesPerSecond:N0} f/s";
                                 summaryGrid.AddRow($"[magenta]>[/] [white]Velocità Attuale :[/] [green]{fpsStr}[/]");
+                                // mostro una percentuale di quanto è carico il channel
+                                int currentQueueLength = State.WorkChannel?.Reader.Count ?? 0;
+                                double queuePercentage = (currentQueueLength / 8192.0) * 100;
+                                summaryGrid.AddRow($"[magenta]>[/] [white]Carico canale :[/] [gray]{queuePercentage:F1}%[/]");
 
                                 // 3. UPDATE TARGET con l'unione delle due griglie
                                 ctx.UpdateTarget(new Rows(workerGrid, summaryGrid));
