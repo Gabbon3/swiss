@@ -25,14 +25,19 @@ namespace plugins.eliminator
         [Option(CliMeta.SilenceFlag, CliMeta.SilenceDesc, "Configurazione")]
         public bool Silence { get; set; } = false;
 
-        [Option("ignore-errors|ie", "Se attivo ignora gli errori di cancellazione dei file", "Configurazione")]
-        public bool IgnoreErrors { get; set; } = false;
-
         [Option("threads|t", "Specifica il numero massimo di thread (default: numero di core della CPU)", "Configurazione")]
         public int? Threads { get; set; }
 
         [Option("force", "Forza l'operazione senza chiedere conferma", "Configurazione")]
         public bool Force { get; set; } = false;
+
+        // -- opzioni di gestione degli errori
+
+        [Option("ignore-errors|ie", "Se attivo tollera i fallimenti d'I/O e continua l'esecuzione", "Gestione errori")]
+        public bool IgnoreErrors { get; set; } = false;
+
+        [Option("log-errors|le", "Se attivo Traccia gli errori dettagliati in un file di log", "Gestione errori")]
+        public bool LogErrors { get; set; } = false;
 
         // --- opzioni di filtraggio ---
 

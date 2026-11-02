@@ -5,6 +5,8 @@ using lib.utils;
 using lib.console;
 using lib.io.stack;
 using Spectre.Console;
+using System.Diagnostics;
+using lib.console.fastprinter;
 
 namespace plugins.eliminator
 {
@@ -13,12 +15,10 @@ namespace plugins.eliminator
         public override string Name => "eliminator";
         public override string Description => "Tool avanzato per la cancellazione e l'archiviazione massiva dei file";
 
-        // dimensione padding per prevenire false-sharing su BytesSavedList e DroppedFilesCountList
-        private const int CounterStride = 8;
-        // 
-        private int FlushMask = 127;
+        // Maschera per il flush dei contatori
+        private const int FlushMask = 127;
+        private const double WorkerChannelLength = 8192.0;
         private EliminationState State = new();
-        private bool _throwErrorOnDelete = true;
 
         // # Stato interno
         /// <summary>
@@ -40,10 +40,19 @@ namespace plugins.eliminator
             public FileSystemFilter? FileFilter { get; set; }
 
             public Channel<StackFileInfo>? WorkChannel { get; set; }
-            public long[] DroppedFilesCountList { get; set; } = [];
-            public long[] BytesSavedList { get; set; } = [];
+            public long TotalDeletedFilesCount = 0;
+            public long TotalBytesSaved = 0;
             public bool IsProcessing { get; set; } = true;
             public bool DropTargetPathAtEnd { get; set; } = false;
+
+            public double ElapsedSeconds { get; set; } = 0.0;
+
+            // Gestione errori
+            public bool IgnoreErrors { get; set; } = false;
+            public bool LogErrors { get; set; } = false;
+            public long TotalErrors = 0;
+            public string ErrorLogPath { get; set; } = "";
+            public FastPrinter? ErrorLogger { get; set; } = null;
         }
 
         private class EliminationStateDebug
@@ -108,10 +117,13 @@ namespace plugins.eliminator
                 PrintWarning($"Conferma bypassata con --force|-f.");
             }
 
-            ConsolePlus.Write($"[Cyan]#[/] Avvio cancellazione ... {(State.IsWhatIf ? "(DEBUG)" : "")}");
+            ConsolePlus.Write($"[Cyan]#[/] Avvio cancellazione ... {(State.IsWhatIf ? "(WHAT IF)" : "")}");
 
+            // Entro qui per fare cancellazione solo dei file
             if (!State.DirsOnly)
             {
+                // traccio il tempo impiegato
+                var stopwatch = Stopwatch.StartNew();
                 var producerTask = CreateProducerTask(settings, ct);
                 var workers = CreateWorkerTasks(ct);
                 Task? monitorTask = null;
@@ -127,6 +139,10 @@ namespace plugins.eliminator
                 finally
                 {
                     State.IsProcessing = false;
+                    if (State.ErrorLogger != null)
+                    {
+                        await State.ErrorLogger.Complete();
+                    }
                 }
 
                 if (monitorTask != null)
@@ -141,6 +157,9 @@ namespace plugins.eliminator
                 }
 
                 await producerTask;
+                // fermo il cronometro
+                stopwatch.Stop();
+                State.ElapsedSeconds = stopwatch.Elapsed.TotalSeconds;
             }
 
             if (ct.IsCancellationRequested)
@@ -148,6 +167,7 @@ namespace plugins.eliminator
                 return;
             }
 
+            // Entro qui solo per la pulizia delle cartelle vuote invece
             bool targetWouldBeEmpty;
             try
             {
@@ -163,9 +183,10 @@ namespace plugins.eliminator
                 return;
             }
 
+            // Cancello la cartella root se richiesto (flag --drop-source)
             CleanUpRootFolder(targetWouldBeEmpty, ct);
 
-            // 6. stampa statistiche finali
+            // stampa statistiche finali
             PrintFinalStatistics();
         }
 
@@ -225,11 +246,26 @@ namespace plugins.eliminator
 
             State.DropTargetPathAtEnd = settings.DropSource;
 
-            // Inizializza gli array per i contatori
-            State.DroppedFilesCountList = new long[State.ThreadNumber * CounterStride];
-            State.BytesSavedList = new long[State.ThreadNumber * CounterStride];
+            // Inizializza i contatori
+            State.TotalDeletedFilesCount = 0;
+            State.TotalBytesSaved = 0;
 
-            _throwErrorOnDelete = !settings.IgnoreErrors;
+            // gestione degli errori
+            State.IgnoreErrors = settings.IgnoreErrors;
+            State.LogErrors = settings.LogErrors;
+            // se voglio tracciare gli errori allora inizializzo l'ErrorLogger
+            // ignore errors deve essere disattivato per poter tracciare gli errori
+            if (State.LogErrors && !State.IgnoreErrors)
+            {
+                State.ErrorLogPath = Path.Combine(Path.GetTempPath(), "swiss", "eliminator", $"eliminator_{DateTime.Now:yyyyMMdd_HHmmss}.log");
+                var output = FastPrinter.GenerateFastOutput(OutputFormat.Json, true, State.ErrorLogPath);
+                var options = new FastPrinter.FastPrinterOptions(
+                    output: output,
+                    singleWriter: false,
+                    capacity: 1000
+                );
+                State.ErrorLogger = new FastPrinter(options);
+            }
 
             return true;
         }
@@ -246,7 +282,7 @@ namespace plugins.eliminator
         /// </summary>
         private Task CreateProducerTask(EliminatorSettings settings, CancellationToken ct)
         {
-            State.WorkChannel = Channel.CreateBounded<StackFileInfo>(new BoundedChannelOptions(8192)
+            State.WorkChannel = Channel.CreateBounded<StackFileInfo>(new BoundedChannelOptions((int)WorkerChannelLength)
             {
                 SingleWriter = true,
                 SingleReader = false
@@ -256,9 +292,11 @@ namespace plugins.eliminator
             {
                 try
                 {
-                    // ROOT: uso FastWalker per scansione multi-thread se il numero di thread di cancellazione è sufficientemente alto (12 threads)
+                    // Selezione della strategia di scansione
+                    bool isNetworkPath = IsNetworkPath(State.TargetPath);
+                    // ROOT: uso FastWalker per scansione multi-thread se mi trovo in un path di rete
                     //       calcolando il numero di threads per la scansione come 1/4 del totale dei threads di cancellazione per ottenere equilibrio
-                    if (State.IsRecursive && State.ThreadNumber >= 12)
+                    if (State.IsRecursive && isNetworkPath)
                     {
                         int scanThreads = State.ThreadNumber / 4;
                         var walkerOptions = new FastWalkerOptions
@@ -390,31 +428,37 @@ namespace plugins.eliminator
                     long localFlushDropped = 0;
                     long localFlushBytes = 0;
                     long totalDropped = 0;
-                    int slot = workerId * CounterStride;
 
                     try
                     {
-                        await foreach (var item in State.WorkChannel!.Reader.ReadAllAsync())
+                        await foreach (var item in State.WorkChannel!.Reader.ReadAllAsync(ct))
                         {
                             using (item)
                             {
-                                totalDropped++;
-                                localFlushDropped++;
-                                localFlushBytes += item.Length;
-
-                                NativeIO.DeleteFile(item.AsPathSpan(), _throwErrorOnDelete);
-
-                                // flush dell'array
-                                if ((localFlushDropped & FlushMask) == 0)
+                                try
                                 {
-                                    long currentDropped = State.DroppedFilesCountList[slot];
-                                    long currentBytes = State.BytesSavedList[slot];
+                                    NativeIO.DeleteFile(item.AsPathSpan());
+                                    totalDropped++;
+                                    localFlushDropped++;
+                                    localFlushBytes += item.Length;
+                                    // flush dei contatori
+                                    if ((localFlushDropped & FlushMask) == 0)
+                                    {
+                                        // aggiorno i contatori globali
+                                        Interlocked.Add(ref State.TotalDeletedFilesCount, localFlushDropped);
+                                        Interlocked.Add(ref State.TotalBytesSaved, localFlushBytes);
 
-                                    Volatile.Write(ref State.DroppedFilesCountList[slot], currentDropped + localFlushDropped);
-                                    Volatile.Write(ref State.BytesSavedList[slot], currentBytes + localFlushBytes);
-
-                                    localFlushDropped = 0;
-                                    localFlushBytes = 0;
+                                        localFlushDropped = 0;
+                                        localFlushBytes = 0;
+                                    }
+                                }
+                                catch (Exception ex)
+                                {
+                                    // conteggio sempre il numero di errori e traccio sul file di log temporaneo solo se richiesto
+                                    Interlocked.Increment(ref State.TotalErrors);
+                                    State.ErrorLogger?.Post($"{item.AsPathSpan()} - {ex.Message}");
+                                    // se non voglio ignorare gli errori, rilancio l'eccezione
+                                    if (!State.IgnoreErrors) throw;
                                 }
 
                                 ct.ThrowIfCancellationRequested();
@@ -424,11 +468,8 @@ namespace plugins.eliminator
                     finally
                     {
                         // invio gli ultimi dati rimasti appesi
-                        long currentDropped = State.DroppedFilesCountList[slot];
-                        long currentBytes = State.BytesSavedList[slot];
-
-                        Volatile.Write(ref State.DroppedFilesCountList[slot], currentDropped + localFlushDropped);
-                        Volatile.Write(ref State.BytesSavedList[slot], currentBytes + localFlushBytes);
+                        Interlocked.Add(ref State.TotalDeletedFilesCount, localFlushDropped);
+                        Interlocked.Add(ref State.TotalBytesSaved, localFlushBytes);
                     }
                 }, ct);
             }
@@ -484,68 +525,47 @@ namespace plugins.eliminator
 
                 try
                 {
-                    // Partiamo con un oggetto vuoto, aggiorneremo con Rows
                     await AnsiConsole.Live(new Text(""))
                         .Cropping(VerticalOverflowCropping.Bottom)
                         .StartAsync(async ctx =>
                         {
                             while (State.IsProcessing && !ct.IsCancellationRequested)
                             {
-                                long currentTotalDropped = 0;
-                                long currentTotalBytesSaved = 0;
+                                // uso volatile read per evitare di stazionare i valori in cache e non vederli piu aggiornarsi
+                                long currentTotalFilesDeleted = Volatile.Read(ref State.TotalDeletedFilesCount);
+                                long currentTotalBytesSaved = Volatile.Read(ref State.TotalBytesSaved);
+                                long errors = Volatile.Read(ref State.TotalErrors);
 
-                                // 1. GRID DEI WORKER (Colonne fisse per allineamento perfetto)
-                                var workerGrid = new Grid()
-                                    .AddColumn(new GridColumn().Width(4).NoWrap()) // T-XX
-                                    .AddColumn(new GridColumn().Width(11).RightAligned().NoWrap()) // File eliminati max 999.999.999
-                                    .AddColumn(new GridColumn().NoWrap().LeftAligned()); // Barra
-
-                                for (int i = 0; i < State.ThreadNumber; i++)
-                                {
-                                    long totalDropped = Volatile.Read(ref State.DroppedFilesCountList[i * CounterStride]);
-                                    long totalBytes = Volatile.Read(ref State.BytesSavedList[i * CounterStride]);
-
-                                    currentTotalDropped += totalDropped;
-                                    currentTotalBytesSaved += totalBytes;
-
-                                    long currentProgress = totalDropped % 4096;
-                                    int dashesCount = (int)(currentProgress / 102);
-                                    string bar = new string('-', dashesCount).PadRight(40, ' ');
-
-                                    workerGrid.AddRow(
-                                        $"[yellow]T-{i:D2}[/]",
-                                        $"[cyan]{totalDropped:N0}[/]",
-                                        $"[grey]|[/][green]{bar}[/][grey]|[/]"
-                                    );
-                                }
-
-                                // Calcoli velocità
+                                // -- Calcolo i file al secondo
                                 double elapsedSeconds = stopwatch.Elapsed.TotalSeconds;
                                 double filesPerSecond = elapsedSeconds > 0
-                                    ? (currentTotalDropped - lastTotalDropped) / elapsedSeconds
+                                    ? (currentTotalFilesDeleted - lastTotalDropped) / elapsedSeconds
                                     : 0;
-
-                                lastTotalDropped = currentTotalDropped;
+                                // --- Aggiorno i totali precedenti per fare i successivi calcoli
+                                lastTotalDropped = currentTotalFilesDeleted;
                                 lastTotalBytesSaved = currentTotalBytesSaved;
                                 stopwatch.Restart();
+                                // ---
+                                // Griglia di sommario
+                                var uiGrid = new Grid().AddColumn(new GridColumn().NoWrap());
+                                uiGrid.AddEmptyRow();
 
-                                // 2. GRID DEL SOMMARIO (Colonna singola per evitare wrap)
-                                var summaryGrid = new Grid().AddColumn(new GridColumn().NoWrap());
-                                summaryGrid.AddEmptyRow();
-
-                                summaryGrid.AddRow($"[magenta]>[/] [white]Totale Eliminati :[/] [cyan]{currentTotalDropped:N0}[/]");
-                                summaryGrid.AddRow($"[magenta]>[/] [white]Spazio Liberato  :[/] [magenta]{Formatter.Bytes(currentTotalBytesSaved)}[/]");
+                                uiGrid.AddRow($"[magenta]>[/] [white]Totale Eliminati :[/] [cyan]{currentTotalFilesDeleted:N0}[/]");
+                                uiGrid.AddRow($"[magenta]>[/] [white]Spazio Liberato  :[/] [magenta]{Formatter.Bytes(currentTotalBytesSaved)}[/]");
 
                                 string fpsStr = $"{(int)filesPerSecond:N0} f/s";
-                                summaryGrid.AddRow($"[magenta]>[/] [white]Velocità Attuale :[/] [green]{fpsStr}[/]");
-                                // mostro una percentuale di quanto è carico il channel
+                                uiGrid.AddRow($"[magenta]>[/] [white]Velocità Attuale :[/] [green]{fpsStr}[/]");
+                                uiGrid.AddRow($"[magenta]>[/] [white]File in errore   :[/] [red]{errors:N0}[/]");
+
+                                // -- Dati Tecnici (allo user non frega nulla ma a me si quindi li metto)
                                 int currentQueueLength = State.WorkChannel?.Reader.Count ?? 0;
-                                double queuePercentage = (currentQueueLength / 8192.0) * 100;
-                                summaryGrid.AddRow($"[magenta]>[/] [white]Carico canale :[/] [gray]{queuePercentage:F1}%[/]");
+                                double queuePercentage = currentQueueLength / WorkerChannelLength * 100;
+                                uiGrid.AddRow($"[magenta]>[/] [white]Carico canale :[/] [gray]{queuePercentage:F1}%[/]");
 
-                                // 3. UPDATE TARGET con l'unione delle due griglie
-                                ctx.UpdateTarget(new Rows(workerGrid, summaryGrid));
+                                // -- Rendering della griglia
+                                ctx.UpdateTarget(new Rows(uiGrid));
 
+                                // -- attendo 250ms tra un rendering e l'altro
                                 await Task.Delay(250, ct);
                             }
                         });
@@ -566,20 +586,31 @@ namespace plugins.eliminator
         /// </summary>
         private void PrintFinalStatistics()
         {
-            long totalDropped = 0;
-            long totalBytesSaved = 0;
-
-            for (int i = 0; i < State.ThreadNumber; i++)
+            ConsolePlus.WriteHr(32);
+            if (State.IsWhatIf)
             {
-                totalDropped += State.DroppedFilesCountList[i * CounterStride];
-                totalBytesSaved += State.BytesSavedList[i * CounterStride];
+                ConsolePlus.Write($"[Cyan]#[/] Operazione Conclusa.");
+                ConsolePlus.Write($"[Cyan]*[/] File che verrebbero cancellati  : [Cyan]{State.DebugInfo.DroppedFilesCount}[/]");
+                ConsolePlus.Write($"[Cyan]*[/] Spazio che verrebbe liberato    : [Magenta]{Formatter.Bytes(State.DebugInfo.BytesSaved)}[/]");
             }
-
-            ConsolePlus.WriteHr(25);
-            ConsolePlus.Write($"[Cyan]#[/] Operazione Conclusa.");
-            ConsolePlus.Write($"[Cyan]*[/] File cancellati  : [Magenta]{totalDropped}[/]");
-            ConsolePlus.Write($"[Cyan]*[/] Spazio coinvolto : [Cyan]{Formatter.Bytes(totalBytesSaved)}[/]");
-            ConsolePlus.WriteHr(25);
+            else
+            {
+                ConsolePlus.Write($"[Cyan]#[/] Operazione Conclusa.");
+                ConsolePlus.Write($"[Cyan]*[/] File cancellati  : [Cyan]{State.TotalDeletedFilesCount}[/]");
+                ConsolePlus.Write($"[Cyan]*[/] Spazio coinvolto : [Magenta]{Formatter.Bytes(State.TotalBytesSaved)}[/]");
+                // Stampo la media dei file cancellati al secondo solo se sto cancellando i files
+                // quindi non sto cancellando solo le cartelle
+                if (!State.DirsOnly)
+                {
+                    ConsolePlus.Write($"[Cyan]*[/] Media files/sec  : [DarkGray]{State.TotalDeletedFilesCount / Math.Max(1, State.ElapsedSeconds):N2} f/s[/]");
+                }
+                // stampo percorso del file di log degli errori se presente
+                if (State.ErrorLogger != null)
+                {
+                    ConsolePlus.Write($"[Cyan]*[/] File di log errori : [Gray]{State.ErrorLogPath}[/]");
+                }
+            }
+            ConsolePlus.WriteHr(32);
         }
 
         #endregion
@@ -727,6 +758,33 @@ namespace plugins.eliminator
         public override void Help()
         {
             PrintHelp<EliminatorSettings>();
+        }
+        #endregion
+        #region Helpers
+        /// <summary>
+        /// Verifica se un percorso è di rete
+        /// </summary>
+        /// <param name="path"></param>
+        /// <returns></returns>
+        private static bool IsNetworkPath(string path)
+        {
+            // check veloce
+            if (path.StartsWith(@"\\")) return true;
+
+            // controllo disco se è di rete
+            string? root = Path.GetPathRoot(path);
+            if (!string.IsNullOrEmpty(root))
+            {
+                try
+                {
+                    var driveInfo = new DriveInfo(root);
+                    return driveInfo.DriveType == DriveType.Network;
+                }
+                catch
+                { // se fallisce sticazzi presuppongo che non sia un path di rete
+                }
+            }
+            return false;
         }
         #endregion
     }

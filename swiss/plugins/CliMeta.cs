@@ -29,7 +29,7 @@ public static class CliMeta
     public const string ThreadsFlag = "threads|t";
     public const string ThreadsDesc = "Numero di thread da usare durante l'esecuzione (default: numero di core)";
     public const string SilenceFlag = "silence|s";
-    public const string SilenceDesc = "Se attivo non mostra risultati di progessione a console";
+    public const string SilenceDesc = "Se attivo non mostra risultati di progressione a console";
     public const string HiddenFlag = "hidden|H";
     public const string HiddenDesc = "Se attivo include i file nascosti nell'enumerazione";
     public const string MinimalOutputFlag = "minimal|m";

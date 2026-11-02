@@ -404,6 +404,26 @@ public class FastPrinter
         _channel.Writer.WriteAsync(new PrintPayload(memory, length)).AsTask().GetAwaiter().GetResult();
     }
 
+    /// <summary>
+    /// Scrive nel canale in modo sincrono. Se il canale è pieno, blocca il thread 
+    /// corrente finché non si libera spazio (Backpressure pura).
+    /// Alternativa con stringa invece di blocco di memoria.
+    /// </summary>
+    /// <param name="message"></param>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public void Post(string message)
+    {
+        // Fast path: Proviamo a scrivere subito
+        if (_channel.Writer.TryWrite(new PrintPayload(message)))
+        {
+            return;
+        }
+
+        // Slow path: Il canale è pieno
+        // uso .AsTask().GetAwaiter().GetResult() per bloccare il worker.
+        _channel.Writer.WriteAsync(new PrintPayload(message)).AsTask().GetAwaiter().GetResult();
+    }
+
     // # chiusura del channel
 
     /// <summary>
