@@ -16,7 +16,7 @@ namespace plugins.eliminator
         public override string Description => "Tool avanzato per la cancellazione e l'archiviazione massiva dei file";
 
         // Maschera per il flush dei contatori
-        private const int FlushMask = 127;
+        private const int FlushMask = 63;
         private const double WorkerChannelLength = 8192.0;
         private EliminationState State = new();
 
@@ -42,6 +42,7 @@ namespace plugins.eliminator
             public Channel<StackFileInfo>? WorkChannel { get; set; }
             public long TotalDeletedFilesCount = 0;
             public long TotalBytesSaved = 0;
+            public long TotalElapsedMilliseconds = 0;
             public bool IsProcessing { get; set; } = true;
             public bool DropTargetPathAtEnd { get; set; } = false;
 
@@ -521,7 +522,7 @@ namespace plugins.eliminator
 
                 long lastTotalDropped = 0;
                 long lastTotalBytesSaved = 0;
-                var stopwatch = System.Diagnostics.Stopwatch.StartNew();
+                var stopwatch = Stopwatch.StartNew();
 
                 try
                 {
@@ -541,6 +542,12 @@ namespace plugins.eliminator
                                 double filesPerSecond = elapsedSeconds > 0
                                     ? (currentTotalFilesDeleted - lastTotalDropped) / elapsedSeconds
                                     : 0;
+                                // -- Calcolo i ms medi per file cancellato
+                                // -- Calcolo i ms medi per file (Derivato direttamente dalle f/s!)
+                                // Se filesPerSecond > 0 calcoliamo 1000 / f/s, altrimenti 0 ms
+                                double avgMsDeletedFile = filesPerSecond > 0
+                                    ? 1000.0 / filesPerSecond
+                                    : 0.0;
                                 // --- Aggiorno i totali precedenti per fare i successivi calcoli
                                 lastTotalDropped = currentTotalFilesDeleted;
                                 lastTotalBytesSaved = currentTotalBytesSaved;
@@ -550,17 +557,18 @@ namespace plugins.eliminator
                                 var uiGrid = new Grid().AddColumn(new GridColumn().NoWrap());
                                 uiGrid.AddEmptyRow();
 
-                                uiGrid.AddRow($"[magenta]>[/] [white]Totale Eliminati :[/] [cyan]{currentTotalFilesDeleted:N0}[/]");
-                                uiGrid.AddRow($"[magenta]>[/] [white]Spazio Liberato  :[/] [magenta]{Formatter.Bytes(currentTotalBytesSaved)}[/]");
+                                uiGrid.AddRow($"[magenta]>[/] [white]Totale Eliminati  :[/] [cyan]{currentTotalFilesDeleted:N0}[/]");
+                                uiGrid.AddRow($"[magenta]>[/] [white]Spazio Liberato   :[/] [magenta]{Formatter.Bytes(currentTotalBytesSaved)}[/]");
 
                                 string fpsStr = $"{(int)filesPerSecond:N0} f/s";
-                                uiGrid.AddRow($"[magenta]>[/] [white]Velocità Attuale :[/] [green]{fpsStr}[/]");
-                                uiGrid.AddRow($"[magenta]>[/] [white]File in errore   :[/] [red]{errors:N0}[/]");
+                                uiGrid.AddRow($"[magenta]>[/] [white]Velocità Attuale  :[/] [green]{fpsStr}[/]");
+                                uiGrid.AddRow($"[magenta]>[/] [white]File in errore    :[/] [red]{errors:N0}[/]");
 
                                 // -- Dati Tecnici (allo user non frega nulla ma a me si quindi li metto)
                                 int currentQueueLength = State.WorkChannel?.Reader.Count ?? 0;
                                 double queuePercentage = currentQueueLength / WorkerChannelLength * 100;
-                                uiGrid.AddRow($"[magenta]>[/] [white]Carico canale :[/] [gray]{queuePercentage:F1}%[/]");
+                                uiGrid.AddRow($"[magenta]>[/] [white]Carico canale     :[/] [gray]{queuePercentage:F1}%[/]");
+                                uiGrid.AddRow($"[magenta]>[/] [white]Rate cancellazione:[/] [gray]{avgMsDeletedFile:N2} ms/file[/]");
 
                                 // -- Rendering della griglia
                                 ctx.UpdateTarget(new Rows(uiGrid));
